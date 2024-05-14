@@ -18,10 +18,14 @@ import (
 	"context"
 	"fmt"
 	"go/constant"
+	"regexp"
+	"slices"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/matrixorigin/matrixone/pkg/common/moerr"
+	"github.com/matrixorigin/matrixone/pkg/common/util"
 	"github.com/matrixorigin/matrixone/pkg/defines"
 	"github.com/matrixorigin/matrixone/pkg/sql/parsers/dialect/mysql"
 	"github.com/matrixorigin/matrixone/pkg/sql/parsers/tree"
@@ -74,20 +78,18 @@ var (
 	}
 )
 
-type published struct {
+type publication struct {
 	pubName     string
 	pubAccount  string
 	pubDatabase string
 	pubTime     string
-	subName     string
-	subTime     string
 }
 
-type subscribed struct {
-	pubName    string
-	pubAccount string
-	subName    string
-	subTime    string
+type subscription struct {
+	publication
+
+	subName string
+	subTime string
 }
 
 func getAccountIdByName(ctx context.Context, ses *Session, bh BackgroundExec, name string) int32 {
@@ -143,7 +145,7 @@ func canSub(subAccount, subAccountListStr string) bool {
 	return false
 }
 
-func getPubs(ctx context.Context, ses *Session, bh BackgroundExec, accountId int32, accountName string, like string, subAccountName string) ([]*published, error) {
+func getPubs(ctx context.Context, ses *Session, bh BackgroundExec, accountId int32, accountName string, like string, subAccountName string) ([]*publication, error) {
 	bh.ClearExecResultBatches()
 	sql := getPubsSql
 	if len(like) > 0 {
@@ -154,7 +156,7 @@ func getPubs(ctx context.Context, ses *Session, bh BackgroundExec, accountId int
 		return nil, err
 	}
 
-	var pubs []*published
+	var pubs []*publication
 	for _, batch := range bh.GetExecResultBatches() {
 		mrs := &MysqlResultSet{
 			Columns: make([]Column, len(batch.Vecs)),
@@ -174,7 +176,7 @@ func getPubs(ctx context.Context, ses *Session, bh BackgroundExec, accountId int
 				continue
 			}
 
-			pub := &published{
+			pub := &publication{
 				pubName:     pubName,
 				pubAccount:  accountName,
 				pubDatabase: pubDatabase,
@@ -208,7 +210,7 @@ func getSubInfoFromSql(ctx context.Context, ses FeSession, sql string) (subName,
 	return
 }
 
-func getSubs(ctx context.Context, ses *Session, bh BackgroundExec, accountId uint32) ([]*subscribed, error) {
+func getSubs(ctx context.Context, ses *Session, bh BackgroundExec, accountId uint32, like string) ([]*subscription, error) {
 	bh.ClearExecResultBatches()
 	ctx = context.WithValue(ctx, defines.TenantIDKey{}, accountId)
 	sql := fmt.Sprintf(getSubsFormat, accountId)
@@ -216,7 +218,7 @@ func getSubs(ctx context.Context, ses *Session, bh BackgroundExec, accountId uin
 		return nil, err
 	}
 
-	var subs []*subscribed
+	var subs []*subscription
 	for _, batch := range bh.GetExecResultBatches() {
 		mrs := &MysqlResultSet{
 			Columns: make([]Column, len(batch.Vecs)),
@@ -236,11 +238,17 @@ func getSubs(ctx context.Context, ses *Session, bh BackgroundExec, accountId uin
 				return nil, err
 			}
 
-			sub := &subscribed{
-				pubName:    pubName,
-				pubAccount: pubAccountName,
-				subName:    subName,
-				subTime:    subTime,
+			if len(like) > 0 && !isLike(pubName, like) {
+				continue
+			}
+
+			sub := &subscription{
+				publication: publication{
+					pubName:    pubName,
+					pubAccount: pubAccountName,
+				},
+				subName: subName,
+				subTime: subTime,
 			}
 			subs = append(subs, sub)
 		}
@@ -275,50 +283,57 @@ func doShowSubscriptions(ctx context.Context, ses *Session, ss *tree.ShowSubscri
 		return err
 	}
 
-	// step 2. traversal all accounts, get all published pubs
-	var allPublished []*published
+	// step 2. traversal all accounts, get all publication pubs
+	var allPubs []*publication
 	for i := 0; i < len(accountIds); i++ {
-		var pubs []*published
+		var pubs []*publication
 		if pubs, err = getPubs(ctx, ses, bh, accountIds[i], accountNames[i], like, ses.GetTenantName()); err != nil {
 			return err
 		}
 
-		allPublished = append(allPublished, pubs...)
+		allPubs = append(allPubs, pubs...)
 	}
 
 	// step 3. get current account's subscriptions
-	allSubscribedMap := make(map[string]map[string]*subscribed)
-	subs, err := getSubs(ctx, ses, bh, ses.GetTenantInfo().GetTenantID())
+	subs, err := getSubs(ctx, ses, bh, ses.GetTenantInfo().TenantID, like)
 	if err != nil {
 		return err
 	}
-	for _, sub := range subs {
-		if _, ok := allSubscribedMap[sub.pubAccount]; !ok {
-			allSubscribedMap[sub.pubAccount] = make(map[string]*subscribed)
-		}
-		allSubscribedMap[sub.pubAccount][sub.pubName] = sub
-	}
 
-	// step 4. join pubs && subs, and sort
-	for _, pub := range allPublished {
-		if sub := allSubscribedMap[pub.pubAccount][pub.pubName]; sub != nil {
-			pub.subName = sub.subName
-			pub.subTime = sub.subTime
+	// step 4. combine pubs && subs, and sort
+	subscribed := make([]bool, len(allPubs))
+	for _, sub := range subs {
+		idx := slices.IndexFunc(allPubs, func(p *publication) bool {
+			return p.pubAccount == sub.pubAccount && p.pubName == sub.pubName
+		})
+
+		if idx != -1 {
+			subscribed[idx] = true
+			sub.pubDatabase = allPubs[idx].pubDatabase
+			sub.pubTime = allPubs[idx].pubTime
+		}
+	}
+	// add unsubscribed pubs if all option set
+	if ss.All {
+		for i, v := range subscribed {
+			if !v {
+				subs = append(subs, &subscription{publication: *allPubs[i]})
+			}
 		}
 	}
 
 	if len(like) > 0 {
 		// sort by pub_name asc
-		sort.SliceStable(allPublished, func(i, j int) bool {
-			return allPublished[i].pubName < allPublished[j].pubName
+		sort.SliceStable(subs, func(i, j int) bool {
+			return subs[i].pubName < subs[j].pubName
 		})
 	} else {
 		// sort by sub_time, pub_time desc
-		sort.SliceStable(allPublished, func(i, j int) bool {
-			if allPublished[i].subTime != allPublished[j].subTime {
-				return allPublished[i].subTime > allPublished[j].subTime
+		sort.SliceStable(subs, func(i, j int) bool {
+			if subs[i].subTime != subs[j].subTime {
+				return subs[i].subTime > subs[j].subTime
 			}
-			return allPublished[i].pubTime > allPublished[j].pubTime
+			return subs[i].pubTime > subs[j].pubTime
 		})
 	}
 
@@ -328,18 +343,62 @@ func doShowSubscriptions(ctx context.Context, ses *Session, ss *tree.ShowSubscri
 	for _, column := range showSubscriptionOutputColumns {
 		rs.AddColumn(column)
 	}
-	for _, pub := range allPublished {
-		if !ss.All && len(pub.subName) == 0 {
-			continue
-		}
 
-		var subName, subTime interface{}
-		subName, subTime = pub.subName, pub.subTime
-		if len(pub.subName) == 0 {
-			subName, subTime = nil, nil
-		}
-		rs.AddRow([]interface{}{pub.pubName, pub.pubAccount, pub.pubDatabase, pub.pubTime, subName, subTime})
+	for _, sub := range subs {
+		rs.AddRow([]interface{}{sub.pubName, sub.pubAccount, nilIfEmpty(sub.pubDatabase), nilIfEmpty(sub.pubTime), nilIfEmpty(sub.subName), nilIfEmpty(sub.subTime)})
 	}
 	ses.SetMysqlResultSet(rs)
 	return nil
+}
+
+func nilIfEmpty(s string) interface{} {
+	if len(s) == 0 {
+		return nil
+	}
+	return s
+}
+
+func isLike(s, pat string) bool {
+	replace := func(s string) string {
+		var oldCharacter rune
+
+		r := make([]byte, len(s)*2)
+		w := 0
+		start := 0
+		for len(s) > start {
+			character, wid := utf8.DecodeRuneInString(s[start:])
+			if oldCharacter == '\\' {
+				w += copy(r[w:], s[start:start+wid])
+				start += wid
+				oldCharacter = 0
+				continue
+			}
+			switch character {
+			case '_':
+				w += copy(r[w:], []byte{'.'})
+			case '%':
+				w += copy(r[w:], []byte{'.', '*'})
+			case '(':
+				w += copy(r[w:], []byte{'\\', '('})
+			case ')':
+				w += copy(r[w:], []byte{'\\', ')'})
+			case '\\':
+			default:
+				w += copy(r[w:], s[start:start+wid])
+			}
+			start += wid
+			oldCharacter = character
+		}
+		return string(r[:w])
+	}
+	convert := func(expr []byte) string {
+		return fmt.Sprintf("^(?s:%s)$", replace(util.UnsafeBytesToString(expr)))
+	}
+
+	realPat := convert([]byte(pat))
+	reg, err := regexp.Compile(realPat)
+	if err != nil {
+		return false
+	}
+	return reg.Match([]byte(s))
 }

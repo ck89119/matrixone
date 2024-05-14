@@ -314,3 +314,25 @@ func TestDoShowSubscriptionsAllLike(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, expected, actual)
 }
+
+func TestIsLike(t *testing.T) {
+	require.True(t, isLike("sub", "sub"))
+	require.False(t, isLike("1sub", "sub"))
+	require.False(t, isLike("sub2", "sub"))
+	require.False(t, isLike("1sub2", "sub"))
+
+	require.True(t, isLike("sub", "%sub"))
+	require.True(t, isLike("1sub", "%sub"))
+	require.False(t, isLike("sub2", "%sub"))
+	require.False(t, isLike("1sub2", "%sub"))
+
+	require.True(t, isLike("sub", "sub%"))
+	require.False(t, isLike("1sub", "sub%"))
+	require.True(t, isLike("sub2", "sub%"))
+	require.False(t, isLike("1sub2", "sub%"))
+
+	require.True(t, isLike("sub", "%sub%"))
+	require.True(t, isLike("1sub", "%sub%"))
+	require.True(t, isLike("sub2", "%sub%"))
+	require.True(t, isLike("1sub2", "%sub%"))
+}
