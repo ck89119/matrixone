@@ -23,7 +23,7 @@ drop snapshot if exists sp01;
 create snapshot sp01 for account acc01;
 show snapshots;
 SNAPSHOT_NAME    TIMESTAMP    SNAPSHOT_LEVEL    ACCOUNT_NAME    DATABASE_NAME    TABLE_NAME
-sp01    2024-05-13 04:06:14.071828    account    acc01
+sp01    2024-06-06 09:08:23.748186    account    acc01        
 show snapshots;
 SNAPSHOT_NAME    TIMESTAMP    SNAPSHOT_LEVEL    ACCOUNT_NAME    DATABASE_NAME    TABLE_NAME
 insert into s3t values (300001, 34, 23, 1);
@@ -248,7 +248,7 @@ drop table acc_test03.table02;
 delete from acc_test03.table03 where col1 = 1;
 invalid input: column col1 does not exist
 update acc_test03.table04 set col1 = 1000;
-internal error: column 'col1' not found in table
+internal error: column 'col1' not found in table 
 alter table acc_test04.index03 drop primary key;
 invalid input: can't add/drop column for partition table now
 select count(*) from acc_test02.pri01;
@@ -303,6 +303,27 @@ count(*)
 2
 drop database acc_test03;
 drop snapshot sp04;
+select * from mo_catalog.mo_tables where relname = 'pri01' and reldatabase = 'acc_test02';
+rel_id    relname    reldatabase    reldatabase_id    relpersistence    relkind    rel_comment    rel_createsql    created_time    creator    owner    account_id    partitioned    partition_info    viewdef    constraint    rel_version    catalog_version
+272678    pri01    acc_test02    272651    p    r    部门表    create table pri01 (deptno int unsigned not null comment "部门编号", dname varchar(15) default null comment "部门名称", loc varchar(50) default null comment "部门所在位置", primary key (deptno)) comment = '部门表'    2024-06-06 17:08:52    1    0    1    0                          \nrel_comment	部门表              \nrelkindr       �\nrel_createsql�create table pri01 (deptno int unsigned not null comment "部门编号", dname varchar(15) default null comment "部门名称", loc varchar(50) default null comment "部门所在位置", primary key (deptno)) comment = '部门表'       "deptno*deptno            )'    0    1
+select * from mo_catalog.mo_tables where relname = 'aff01' and reldatabase = 'acc_test02';
+rel_id    relname    reldatabase    reldatabase_id    relpersistence    relkind    rel_comment    rel_createsql    created_time    creator    owner    account_id    partitioned    partition_info    viewdef    constraint    rel_version    catalog_version
+272679    aff01    acc_test02    272651    p    r        create table aff01 (empno int unsigned not null auto_increment comment "雇员编号", ename varchar(15) default null comment "雇员姓名", job varchar(10) default null comment "雇员职位", mgr int unsigned default null comment "雇员对应的领导的编号", hiredate date default null comment "雇员的雇佣日期", sal decimal(7, 2) default null comment "雇员的基本工资", comm decimal(7, 2) default null comment "奖金", deptno int unsigned default null comment "所在部门", primary key (empno), constraint c1 foreign key (deptno) references pri01(deptno) on delete restrict on update restrict)    2024-06-06 17:08:52    1    0    1    0                          \nrelkindr      {\nrel_createsql�create table aff01 (empno int unsigned not null auto_increment comment "雇员编号", ename varchar(15) default null comment "雇员姓名", job varchar(10) default null comment "雇员职位", mgr int unsigned default null comment "雇员对应的领导的编号", hiredate date default null comment "雇员的雇佣日期", sal decimal(7, 2) default null comment "雇员的基本工资", comm decimal(7, 2) default null comment "奖金", deptno int unsigned default null comment "所在部门", primary key (empno), constraint c1 foreign key (deptno) references pri01(deptno) on delete restrict on update restrict)       "empno*empno              \nc1��"    0    1
+show databases;
+Database
+acc_test02
+acc_test04
+information_schema
+mo_catalog
+mysql
+system
+system_metrics
+select count(*) from acc_test02.pri01;
+count(*)
+4
+select count(*) from acc_test02.aff01;
+count(*)
+14
 drop database if exists test01;
 create database test01;
 use test01;
@@ -315,6 +336,28 @@ create table table02 (col1 int unique key, col2 varchar(20));
 insert into table02 (col1, col2) values (133, 'database');
 drop snapshot if exists sp07;
 create snapshot sp07 for account acc01;
+select * from mo_catalog.mo_tables where relname = 'pri01' and reldatabase = 'acc_test02';
+rel_id    relname    reldatabase    reldatabase_id    relpersistence    relkind    rel_comment    rel_createsql    created_time    creator    owner    account_id    partitioned    partition_info    viewdef    constraint    rel_version    catalog_version
+272678    pri01    acc_test02    272651    p    r    部门表    create table pri01 (deptno int unsigned not null comment "部门编号", dname varchar(15) default null comment "部门名称", loc varchar(50) default null comment "部门所在位置", primary key (deptno)) comment = '部门表'    2024-06-06 17:08:52    1    0    1    0                          \nrel_comment	部门表              \nrelkindr       �\nrel_createsql�create table pri01 (deptno int unsigned not null comment "部门编号", dname varchar(15) default null comment "部门名称", loc varchar(50) default null comment "部门所在位置", primary key (deptno)) comment = '部门表'       "deptno*deptno            )'    0    1
+select * from mo_catalog.mo_tables where relname = 'aff01' and reldatabase = 'acc_test02';
+rel_id    relname    reldatabase    reldatabase_id    relpersistence    relkind    rel_comment    rel_createsql    created_time    creator    owner    account_id    partitioned    partition_info    viewdef    constraint    rel_version    catalog_version
+272679    aff01    acc_test02    272651    p    r        create table aff01 (empno int unsigned not null auto_increment comment "雇员编号", ename varchar(15) default null comment "雇员姓名", job varchar(10) default null comment "雇员职位", mgr int unsigned default null comment "雇员对应的领导的编号", hiredate date default null comment "雇员的雇佣日期", sal decimal(7, 2) default null comment "雇员的基本工资", comm decimal(7, 2) default null comment "奖金", deptno int unsigned default null comment "所在部门", primary key (empno), constraint c1 foreign key (deptno) references pri01(deptno) on delete restrict on update restrict)    2024-06-06 17:08:52    1    0    1    0                          \nrelkindr      {\nrel_createsql�create table aff01 (empno int unsigned not null auto_increment comment "雇员编号", ename varchar(15) default null comment "雇员姓名", job varchar(10) default null comment "雇员职位", mgr int unsigned default null comment "雇员对应的领导的编号", hiredate date default null comment "雇员的雇佣日期", sal decimal(7, 2) default null comment "雇员的基本工资", comm decimal(7, 2) default null comment "奖金", deptno int unsigned default null comment "所在部门", primary key (empno), constraint c1 foreign key (deptno) references pri01(deptno) on delete restrict on update restrict)       "empno*empno              \nc1��"    0    1
+show databases;
+Database
+acc_test02
+acc_test04
+information_schema
+mo_catalog
+mysql
+system
+system_metrics
+test01
+select count(*) from acc_test02.pri01;
+count(*)
+4
+select count(*) from acc_test02.aff01;
+count(*)
+14
 use test01;
 drop table table01;
 insert into table02 values(134, 'database');
@@ -322,8 +365,8 @@ drop snapshot if exists sp08;
 create snapshot sp08 for account acc01;
 show snapshots;
 SNAPSHOT_NAME    TIMESTAMP    SNAPSHOT_LEVEL    ACCOUNT_NAME    DATABASE_NAME    TABLE_NAME
-sp08    2024-05-13 04:06:43.063866    account    acc01
-sp07    2024-05-13 04:06:42.939465    account    acc01
+sp08    2024-06-06 09:08:52.422115    account    acc01        
+sp07    2024-06-06 09:08:52.377055    account    acc01        
 use test01;
 create table table03 (col1 int);
 insert into table03 values (1),(2);
