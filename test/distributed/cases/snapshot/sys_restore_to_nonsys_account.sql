@@ -216,7 +216,13 @@ drop database acc_test03;
 -- @session
 drop snapshot sp04;
 
-
+select * from mo_catalog.mo_tables where relname = 'acc_test02' and reldatabase = 'pri01';
+select * from mo_catalog.mo_tables where relname = 'acc_test02' and reldatabase = 'aff01';
+-- @session:id=1&user=acc01:test_account&password=111
+show databases;
+select count(*) from acc_test02.pri01;
+select count(*) from acc_test02.aff01;
+-- @session
 
 -- acc01 create sp01,sp02, restore sp02, restore sp01
 -- @session:id=1&user=acc01:test_account&password=111
@@ -234,6 +240,14 @@ insert into table02 (col1, col2) values (133, 'database');
 
 drop snapshot if exists sp07;
 create snapshot sp07 for account acc01;
+
+select * from mo_catalog.mo_tables where relname = 'acc_test02' and reldatabase = 'pri01';
+select * from mo_catalog.mo_tables where relname = 'acc_test02' and reldatabase = 'aff01';
+-- @session:id=1&user=acc01:test_account&password=111
+show databases;
+select count(*) from acc_test02.pri01;
+select count(*) from acc_test02.aff01;
+-- @session
 
 -- @session:id=1&user=acc01:test_account&password=111
 use test01;
