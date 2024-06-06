@@ -23,7 +23,7 @@ drop snapshot if exists sp01;
 create snapshot sp01 for account acc01;
 show snapshots;
 SNAPSHOT_NAME    TIMESTAMP    SNAPSHOT_LEVEL    ACCOUNT_NAME    DATABASE_NAME    TABLE_NAME
-sp01    2024-06-06 10:19:39.40881    account    acc01        
+sp01    2024-06-06 12:22:24.808768    account    acc01        
 show snapshots;
 SNAPSHOT_NAME    TIMESTAMP    SNAPSHOT_LEVEL    ACCOUNT_NAME    DATABASE_NAME    TABLE_NAME
 insert into s3t values (300001, 34, 23, 1);
@@ -361,8 +361,8 @@ drop snapshot if exists sp08;
 create snapshot sp08 for account acc01;
 show snapshots;
 SNAPSHOT_NAME    TIMESTAMP    SNAPSHOT_LEVEL    ACCOUNT_NAME    DATABASE_NAME    TABLE_NAME
-sp08    2024-06-06 10:20:08.55923    account    acc01        
-sp07    2024-06-06 10:20:08.511846    account    acc01        
+sp08    2024-06-06 12:22:50.542315    account    acc01        
+sp07    2024-06-06 12:22:50.495604    account    acc01        
 use test01;
 create table table03 (col1 int);
 insert into table03 values (1),(2);

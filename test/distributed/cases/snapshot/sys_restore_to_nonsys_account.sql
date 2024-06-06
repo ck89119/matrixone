@@ -216,7 +216,6 @@ drop database acc_test03;
 -- @session
 drop snapshot sp04;
 
--- @ignore:0,1,2,3,4,5,6
 select rel_id, relname, reldatabase, reldatabase_id, creator, owner, account_id from mo_catalog.mo_tables where reldatabase = 'acc_test02';
 -- @session:id=1&user=acc01:test_account&password=111
 show databases;
@@ -241,7 +240,6 @@ insert into table02 (col1, col2) values (133, 'database');
 drop snapshot if exists sp07;
 create snapshot sp07 for account acc01;
 
--- @ignore:0,1,2,3,4,5,6
 select rel_id, relname, reldatabase, reldatabase_id, creator, owner, account_id from mo_catalog.mo_tables where reldatabase = 'acc_test02';
 -- @session:id=1&user=acc01:test_account&password=111
 show databases;
@@ -266,7 +264,6 @@ create table table03 (col1 int);
 insert into table03 values (1),(2);
 -- @session
 
--- @ignore:0,1,2,3,4,5,6
 select rel_id, relname, reldatabase, reldatabase_id, creator, owner, account_id from mo_catalog.mo_tables where reldatabase = 'acc_test02';
 -- @session:id=1&user=acc01:test_account&password=111
 show databases;
