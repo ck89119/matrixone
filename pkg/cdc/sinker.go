@@ -529,7 +529,7 @@ func (s *mysqlSink) Send(ctx context.Context, ar *ActiveRoutine, sql string) (er
 		}
 
 		start := time.Now()
-		_, err = s.conn.Exec(sql)
+		//_, err = s.conn.Exec(sql)
 		v2.CdcSendSqlDurationHistogram.Observe(time.Since(start).Seconds())
 		// return if success
 		if err == nil {
