@@ -292,12 +292,10 @@ func (reader *tableReader) readTableWithTxn(
 			insertAtmBatch.Append(packer, insertData, reader.insTsColIdx, reader.insCompositedPkColIdx)
 			deleteAtmBatch.Append(packer, deleteData, reader.delTsColIdx, reader.delCompositedPkColIdx)
 
-			//if !strings.Contains(reader.info.SourceTblName, "order") {
-			//	logutil.Errorf("tableReader(%s)[%s, %s], insertAtmBatch: %s, deleteAtmBatch: %s",
-			//		reader.info.SourceTblName, fromTs.ToString(), toTs.ToString(),
-			//		insertAtmBatch.DebugString(reader.tableDef, false),
-			//		deleteAtmBatch.DebugString(reader.tableDef, true))
-			//}
+			logutil.Errorf("tableReader(%s)[%s, %s], insertAtmBatch: %s, deleteAtmBatch: %s",
+				reader.info.SourceTblName, fromTs.ToString(), toTs.ToString(),
+				insertAtmBatch.DebugString(reader.tableDef, false),
+				deleteAtmBatch.DebugString(reader.tableDef, true))
 
 			err = reader.sinker.Sink(ctx, &DecoderOutput{
 				outputTyp:      OutputTypeTail,
