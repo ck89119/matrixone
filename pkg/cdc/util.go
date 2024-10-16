@@ -729,3 +729,16 @@ func batchRowCount(bat *batch.Batch) int {
 	}
 	return bat.Vecs[0].Length()
 }
+
+func batchDebugString(bat *batch.Batch, tableDef *plan.TableDef) string {
+	ctx := context.Background()
+	keys := make([]string, 0, batchRowCount(bat))
+	for i := 0; i < cap(keys); i++ {
+		s, err := getRowPkAndTsFromBat(ctx, bat, tableDef, false, i)
+		if err != nil {
+			return ""
+		}
+		keys = append(keys, s)
+	}
+	return fmt.Sprintf("count=%d, key=%v", len(keys), keys)
+}
