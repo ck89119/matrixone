@@ -269,6 +269,10 @@ func (reader *tableReader) readTableWithTxn(
 
 		switch curHint {
 		case engine.ChangesHandle_Snapshot:
+			logutil.Errorf("tableReader(%s)[%s, %s], insertData: %s",
+				reader.info.SourceTblName, fromTs.ToString(), toTs.ToString(),
+				batchDebugString(insertData, reader.tableDef))
+
 			// transform into insert instantly
 			err = reader.sinker.Sink(ctx, &DecoderOutput{
 				outputTyp:     OutputTypeSnapshot,
