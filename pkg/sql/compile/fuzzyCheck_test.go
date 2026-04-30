@@ -298,6 +298,34 @@ func TestConstructFuzzyFilterFallsBackToPkeyColName(t *testing.T) {
 	require.Equal(t, "id", op.PkName)
 }
 
+// When plan has no Fuzzymessage and the target is a hidden index table
+// (CREATE UNIQUE INDEX direct-insert path), constructFuzzyFilter must
+// substitute a neutral placeholder for PkName instead of the raw
+// __mo_index_idx_col / __mo_cpkey_col column name.
+func TestConstructFuzzyFilterHiddenOnlyFallback(t *testing.T) {
+	idxColType := plan.Type{Id: 27}
+	n := &plan.Node{
+		TableDef: &plan.TableDef{
+			Name: catalog.PrefixIndexTableName + "unique_hash",
+			Pkey: &plan.PrimaryKeyDef{
+				PkeyColName: catalog.IndexTableIndexColName,
+			},
+			Cols: []*plan.ColDef{
+				{Name: catalog.IndexTableIndexColName, Typ: idxColType},
+			},
+		},
+	}
+	tableScan := &plan.Node{Stats: &plan.Stats{Cost: 100}}
+	sinkScan := &plan.Node{Stats: &plan.Stats{Cost: 100}}
+
+	op := constructFuzzyFilter(n, tableScan, sinkScan)
+	require.NotNil(t, op)
+	require.NotEqual(t, catalog.IndexTableIndexColName, op.PkName,
+		"hidden-only direct fuzzy filter must not leak internal index column name")
+	require.NotContains(t, op.PkName, "__mo_",
+		"hidden-only direct fuzzy filter must not surface any __mo_ internal name")
+}
+
 // TestConstructFuzzyFilterCompositeParentUniqueCols verifies the composite
 // unique-index path surfaces a "(col1,col2)" tuple as PkName so runtime
 // duplicate errors do not leak __mo_index_idx_col.

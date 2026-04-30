@@ -772,6 +772,14 @@ func constructFuzzyFilter(n, tableScan, sinkScan *plan.Node) *fuzzyfilter.FuzzyF
 				displayPkName = "(" + strings.Join(names, ",") + ")"
 			}
 		}
+	} else if n.TableDef != nil && catalog.IsHiddenTable(n.TableDef.Name) {
+		// Direct-insert path into a hidden UNIQUE index table (e.g.
+		// CREATE UNIQUE INDEX on an existing table). The plan does not
+		// carry Fuzzymessage, so pkName is still __mo_index_idx_col /
+		// __mo_cpkey_col. Mirror the placeholder used in newFuzzyCheck
+		// so runtime duplicate-entry errors do not leak the internal
+		// catalog column name.
+		displayPkName = "unique index"
 	}
 
 	op := fuzzyfilter.NewArgument()
