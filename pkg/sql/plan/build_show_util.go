@@ -642,11 +642,17 @@ func FormatColType(colType plan.Type) string {
 }
 
 // Character replace mapping maps certain special characters to their escape sequences.
+// Backslash must be doubled first (conceptually, though map iteration order is
+// irrelevant because EscapeFormat walks the input exactly once): if it is left
+// bare, a round-trip through the MySQL scanner collapses \<x> to the unescaped
+// form (e.g. "a\b" re-parses as "a" + 0x08, not "a\\b"), silently mutating
+// ENUM/SET member values.
 var replaceMap = map[rune]string{
 	'\000': "\\0",
 	'\'':   "''",
 	'\n':   "\\n",
 	'\r':   "\\r",
+	'\\':   "\\\\",
 }
 
 // EscapeFormat output escape character with backslash.
@@ -673,12 +679,23 @@ func formatIdent(s string) string {
 	return strings.ReplaceAll(s, "`", "``")
 }
 
-// formatStrLit returns s as a MySQL single-quoted string literal with any
-// embedded single quotes doubled per the standard escape rule. It is the
-// right helper for column/table/index comments and any context that emits
-// a quoted literal.
+// formatStrLit returns s as a MySQL single-quoted string literal with both
+// backslashes and single quotes escaped so the output round-trips through
+// the parser unchanged. The MySQL scanner treats \<x> as an escape — \b
+// becomes 0x08, \n becomes newline, etc. — so a value containing a literal
+// backslash must be emitted as \\ or the re-parsed result mutates.
+//
+// NOTE: this helper is for call sites whose input is *raw* text. Column
+// and table comments are stored in pre-quote-escaped form
+// (util.DealCommentString doubles ' at parse time) and go through a plain
+// '...' concatenation instead; do not switch them to this helper without
+// also rethinking the pre-escape contract.
 func formatStrLit(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+	// Order matters: escape backslashes first, otherwise the \\ inserted by
+	// the single-quote step would itself be re-escaped.
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "'", "''")
+	return "'" + s + "'"
 }
 
 func getTimeStampByTsHint(ctx CompilerContext, AtTsExpr *tree.AtTimeStamp) (snapshot *plan.Snapshot, err error) {

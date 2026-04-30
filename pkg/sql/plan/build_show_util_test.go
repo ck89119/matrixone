@@ -258,6 +258,25 @@ func TestFormatStrLitEscapesSingleQuotes(t *testing.T) {
 	require.Equal(t, "'''hi''there'''", formatStrLit("'hi'there'"))
 }
 
+// TestFormatStrLitEscapesBackslashes pins the round-trip contract for raw
+// strings that contain a literal backslash. The MySQL scanner collapses
+// \b / \n / \r / \t / \Z / \0 into their control-char equivalents, so a
+// value like "a\b" must be emitted as 'a\\b' — otherwise re-parsing the
+// SHOW CREATE output silently turns it into "a" + 0x08.
+func TestFormatStrLitEscapesBackslashes(t *testing.T) {
+	require.Equal(t, `'a\\b'`, formatStrLit(`a\b`))
+	// Combined quote + backslash still escapes both.
+	require.Equal(t, `'o''\\brien'`, formatStrLit(`o'\brien`))
+}
+
+// TestEscapeFormatEscapesBackslashes guards the ENUM/SET member formatter.
+// A SET member declared as SET('a\\b') is stored with one literal backslash;
+// the old EscapeFormat replaceMap did not include '\\' -> "\\\\", so
+// FormatColType emitted SET('a\b'), which re-parses as "a" + 0x08.
+func TestEscapeFormatEscapesBackslashes(t *testing.T) {
+	require.Equal(t, `a\\b`, EscapeFormat(`a\b`))
+}
+
 // TestShowCreateSetMemberCasePreservation verifies the SHOW CREATE column
 // loop only lower-cases the leading "SET" keyword and keeps the declared
 // member-name case, so SET('Read','Write') round-trips as set('Read','Write')
