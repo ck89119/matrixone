@@ -2569,7 +2569,11 @@ func numericToBit[T constraints.Integer | constraints.Float](
 				if f < 0 {
 					return moerr.NewOutOfRangef(ctx, fmt.Sprintf("bit(%d)", bitSize), "value '%v'", f)
 				}
-				if math.Round(f) > math.MaxUint64 {
+				// float64(math.MaxUint64) rounds up to 2^64, so comparing
+				// against that constant misses values in (MaxUint64, 2^64],
+				// which then become implementation-defined when converted to
+				// uint64. Compare against the smallest unrepresentable float.
+				if math.Round(f) >= maxUint64FloatExclusive {
 					return moerr.NewOutOfRangef(ctx, fmt.Sprintf("bit(%d)", bitSize), "value '%v'", f)
 				}
 				val = uint64(math.Round(f))
@@ -6156,10 +6160,25 @@ func overflowForNumericToNumeric[T1, T2 constraints.Integer | constraints.Float]
 	return nil
 }
 
+// float64 boundaries for int64/uint64 are not exactly representable:
+//   - math.MaxInt64  = 2^63 - 1, but float64(math.MaxInt64)  = 2^63.
+//   - math.MaxUint64 = 2^64 - 1, but float64(math.MaxUint64) = 2^64.
+//
+// So `rounded > float64(MaxInt64)` misses `rounded == 2^63` even though the
+// real int64 range ends at 2^63 - 1, after which T2(float64) behaviour is
+// implementation-defined. Reject using the smallest float that already
+// overflows the integer range. Lower bounds (MinInt64, 0) are exactly
+// representable, so a normal `<` comparison is fine.
+var (
+	maxInt64FloatExclusive  = math.Pow(2, 63) // first float > MaxInt64
+	maxUint64FloatExclusive = math.Pow(2, 64) // first float > MaxUint64
+)
+
 // checkFloatForInteger rejects NaN, Inf, and values that round outside the
-// target integer range. maxV is passed as float64 because the caller uses
-// typed constants (math.MaxUint64 fits in float64 exactly up to the cast's
-// rounding point — the comparison is done in float64 anyway).
+// target integer range. For int64/uint64 the upper bound is compared against
+// a pre-computed "smallest unrepresentable float" because float64 cannot
+// represent MaxInt64 / MaxUint64 exactly; for all narrower targets the
+// typed max is exactly representable and a regular > compare is sufficient.
 func checkFloatForInteger(ctx context.Context, x, minV, maxV float64, typeName string) error {
 	if math.IsNaN(x) {
 		return moerr.NewOutOfRangef(ctx, typeName, "value 'NaN'")
@@ -6168,8 +6187,19 @@ func checkFloatForInteger(ctx context.Context, x, minV, maxV float64, typeName s
 		return moerr.NewOutOfRangef(ctx, typeName, "value '%v'", x)
 	}
 	rounded := math.Round(x)
-	if rounded > maxV || rounded < minV {
-		return moerr.NewOutOfRangef(ctx, typeName, "value '%v'", x)
+	switch typeName {
+	case "int64":
+		if rounded >= maxInt64FloatExclusive || rounded < minV {
+			return moerr.NewOutOfRangef(ctx, typeName, "value '%v'", x)
+		}
+	case "uint64":
+		if rounded >= maxUint64FloatExclusive || rounded < 0 {
+			return moerr.NewOutOfRangef(ctx, typeName, "value '%v'", x)
+		}
+	default:
+		if rounded > maxV || rounded < minV {
+			return moerr.NewOutOfRangef(ctx, typeName, "value '%v'", x)
+		}
 	}
 	return nil
 }

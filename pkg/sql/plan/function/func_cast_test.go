@@ -2990,6 +2990,39 @@ func TestFloatCastNegativeOverflowAndNaN(t *testing.T) {
 		OverflowForNumericToNumeric[float32, int16](ctx, []float32{-40000}, nil))
 }
 
+// TestFloatToInt64Uint64BoundaryPrecision guards the precision hole around
+// 2^63 / 2^64 where math.MaxInt64 / math.MaxUint64 are not exactly
+// representable as float64. Before the fix, float64(2^63) passed the
+// "rounded > float64(MaxInt64)" test (since float64(MaxInt64) == 2^63) and
+// then int64(2^63) produced an implementation-defined wrap-around.
+func TestFloatToInt64Uint64BoundaryPrecision(t *testing.T) {
+	ctx := context.Background()
+
+	// 2^63 is the smallest float > MaxInt64; must be rejected.
+	require.Error(t,
+		OverflowForNumericToNumeric[float64, int64](ctx, []float64{math.Pow(2, 63)}, nil),
+		"float64(2^63) -> int64 must be rejected, not cast to MinInt64")
+
+	// The largest float64 that is <= MaxInt64 is 9223372036854774784
+	// (= 2^63 - 1024). That must still pass.
+	require.NoError(t,
+		OverflowForNumericToNumeric[float64, int64](ctx, []float64{9223372036854774784}, nil))
+
+	// 2^64 is the smallest float > MaxUint64; must be rejected.
+	require.Error(t,
+		OverflowForNumericToNumeric[float64, uint64](ctx, []float64{math.Pow(2, 64)}, nil),
+		"float64(2^64) -> uint64 must be rejected, not wrap to 0")
+
+	// The largest exactly-representable float64 below 2^64 is
+	// 18446744073709549568 (= 2^64 - 2048). Must still pass.
+	require.NoError(t,
+		OverflowForNumericToNumeric[float64, uint64](ctx, []float64{18446744073709549568}, nil))
+
+	// -1 rejected for uint64.
+	require.Error(t,
+		OverflowForNumericToNumeric[float64, uint64](ctx, []float64{-1}, nil))
+}
+
 // TestNumericToBitRejectsInvalidFloat ensures cast(x as bit(n)) for a
 // float source rejects NaN, Inf, negative values, and values above
 // uint64's range — previously uint64(math.Round(...)) silently produced
@@ -3019,5 +3052,8 @@ func TestNumericToBitRejectsInvalidFloat(t *testing.T) {
 	run(t, math.Inf(-1), true, "-Inf -> bit must be rejected")
 	run(t, -1.0, true, "negative float -> bit must be rejected")
 	run(t, 1e30, true, "above uint64 range -> bit must be rejected")
+	// 2^64 is the smallest float > MaxUint64; must be rejected (regression
+	// guard for the float64(MaxUint64) imprecision).
+	run(t, math.Pow(2, 64), true, "float64(2^64) -> bit must be rejected")
 	run(t, 3.0, false, "valid small float rounds to 3")
 }
