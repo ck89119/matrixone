@@ -7100,6 +7100,32 @@ func supportsRemoteAffectedRowsSelectors(service string) bool {
 	return ok && protocolVersion >= defines.MORPCVersion24
 }
 
+func supportsRemoteODKUAffectedRows(service string) bool {
+	rt := moruntime.ServiceRuntime(service)
+	if rt == nil {
+		return false
+	}
+	version, ok := rt.GetGlobalVariables(moruntime.MOProtocolVersion)
+	if !ok {
+		return false
+	}
+	protocolVersion, ok := version.(int64)
+	return ok && protocolVersion >= defines.MORPCVersion50
+}
+
+func supportsRemoteODKUActionRows(service string) bool {
+	rt := moruntime.ServiceRuntime(service)
+	if rt == nil {
+		return false
+	}
+	version, ok := rt.GetGlobalVariables(moruntime.MOProtocolVersion)
+	if !ok {
+		return false
+	}
+	protocolVersion, ok := version.(int64)
+	return ok && protocolVersion >= defines.MORPCVersion51
+}
+
 func supportsRemoteCrossDomainStringLiterals(service string) bool {
 	rt := moruntime.ServiceRuntime(service)
 	if rt == nil {
@@ -7618,11 +7644,12 @@ func (c *Compile) compileMultiUpdate(node *plan.Node, ss []*Scope) ([]*Scope, er
 
 func (c *Compile) compilePreInsertUk(node *plan.Node, ss []*Scope) []*Scope {
 	currentFirstFlag := c.anal.isFirst
-	if node.PreInsertUkCtx.GetInsertIgnoreMultiDedup() &&
+	if (node.PreInsertUkCtx.GetInsertIgnoreMultiDedup() ||
+		node.PreInsertUkCtx.GetOdkuTargetArbitration()) &&
 		(len(ss) > 1 || ss[0].NodeInfo.Mcpu > 1) {
-		// Multi-key INSERT IGNORE arbitration is row-global: partitioning by one
-		// key cannot observe conflicts on the other keys.  Merge candidate streams
-		// before the stateful arbiter; ordinary index PRE_INSERT_UK stays parallel.
+		// Ordered multi-key arbitration is row-global: partitioning by one key
+		// cannot observe conflicts on the other keys. Merge candidate streams before
+		// the stateful arbiter; ordinary index PRE_INSERT_UK stays parallel.
 		ss = []*Scope{c.newMergeScope(ss)}
 	}
 	for i := range ss {
@@ -7856,6 +7883,11 @@ func (c *Compile) compileSinkScanNode(node *plan.Node, curNodeIdx int32) ([]*Sco
 func (c *Compile) compileSinkNode(node *plan.Node, ss []*Scope, step int32) ([]*Scope, error) {
 	receivers := c.getStepRegs(step)
 	if len(receivers) == 0 {
+		// compileSinkNode takes ownership of its input scopes. A malformed/orphan
+		// sink is rejected before they are attached to an output scope, so release
+		// them here; otherwise the reuse finalizer turns this plan error into a CN
+		// panic and restart.
+		ReleaseScopes(ss)
 		return nil, moerr.NewInternalError(c.proc.Ctx, "no data receiver for sink node")
 	}
 
