@@ -843,6 +843,15 @@ func TestStringShuffleHashAlgorithmIsCopiedPerPipelineProcess(t *testing.T) {
 		proc.NewNoContextChildProc(0).StringShuffleHashAlgorithm())
 }
 
+func TestRuntimeStringDomainPrepareParamMetadataForRemoteValidation(t *testing.T) {
+	_, err := RuntimeStringDomainPrepareParamMetadataForRemote("old-peer", 1, []uint32{uint32(types.RuntimeStringText)})
+	require.ErrorContains(t, err, "protocol version 50")
+	_, err = RuntimeStringDomainPrepareParamMetadataForRemote("old-peer", 1, []uint32{3})
+	require.ErrorContains(t, err, "invalid runtime string domain")
+	_, err = RuntimeStringDomainPrepareParamMetadataForRemote("old-peer", 2, []uint32{uint32(types.RuntimeStringText)})
+	require.ErrorContains(t, err, "metadata length")
+}
+
 func TestCodecServiceRoundTripsPreparedRowsFrameParams(t *testing.T) {
 	proc, _ := newCodecTestProcess(t)
 	frameParams := vector.NewVec(types.T_text.ToType())
@@ -859,6 +868,9 @@ func TestCodecServiceRoundTripsPreparedRowsFrameParams(t *testing.T) {
 		vector.PrepareParamDecimal,
 		vector.PrepareParamBoolean,
 	})
+	require.NoError(t, frameParams.SetRuntimeStringDomainsWithMP([]types.RuntimeStringDomain{
+		types.RuntimeStringInherit, types.RuntimeStringText, types.RuntimeStringBinary,
+	}, proc.Mp()))
 
 	svc := NewCodecService(fakeCodecTxnClient{op: fakeCodecTxnOperator{}}, nil, nil, nil, nil, nil, nil, nil)
 	payload, err := svc.Encode(proc, "select sum(n) over (order by id rows between ? preceding and ? following)")
@@ -873,6 +885,7 @@ func TestCodecServiceRoundTripsPreparedRowsFrameParams(t *testing.T) {
 		false, false, true,
 	}, info.PrepareParams.IsBin)
 	require.Equal(t, []uint32{4, 3, 2}, info.PrepareParams.StringSources)
+	require.Equal(t, []uint32{0, 1, 2}, info.PrepareParams.RuntimeStringDomains)
 	decodedProc, err := svc.Decode(context.Background(), info)
 	require.NoError(t, err)
 	defer decodedProc.Free()
@@ -894,6 +907,9 @@ func TestCodecServiceRoundTripsPreparedRowsFrameParams(t *testing.T) {
 	require.Equal(t, types.StringSourceCOMStmt, decodedParams.GetStringSourceAt(0))
 	require.Equal(t, types.StringSourceSQLPrepare, decodedParams.GetStringSourceAt(1))
 	require.Equal(t, types.StringSourceUserVariable, decodedParams.GetStringSourceAt(2))
+	require.Equal(t, types.RuntimeStringInherit, decodedParams.GetRuntimeStringDomainAt(0))
+	require.Equal(t, types.RuntimeStringText, decodedParams.GetRuntimeStringDomainAt(1))
+	require.Equal(t, types.RuntimeStringBinary, decodedParams.GetRuntimeStringDomainAt(2))
 }
 
 func TestCodecServiceDecodesLegacyPrepareParamsWithoutBinaryFlags(t *testing.T) {
