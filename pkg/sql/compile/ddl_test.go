@@ -1484,6 +1484,108 @@ func TestDropIndexChildRelationCleansLegacyPrivileges(t *testing.T) {
 	}, sqls)
 }
 
+func TestAlterTableInplaceDropIndexUsesParentOwnedDelete(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	const (
+		indexName = "idx_v"
+		childName = "__mo_index_idx_v"
+	)
+	deleteEntered := make(chan struct{})
+	releaseDelete := make(chan struct{})
+	var releaseDeleteOnce sync.Once
+	release := func() { releaseDeleteOnce.Do(func() { close(releaseDelete) }) }
+	t.Cleanup(release)
+	deleteErr := errors.New("injected child delete failure")
+	unexpectedSQL := make(chan string, 1)
+
+	proc := testutil.NewProcess(t)
+	proc.Base.SessionInfo.Buf = buffer.New()
+	ctx := defines.AttachAccountId(context.Background(), catalog.System_Account)
+	proc.Ctx = ctx
+	proc.ReplaceTopCtx(ctx)
+	txnCli, txnOp := newTestTxnClientAndOp(ctrl)
+	proc.Base.TxnClient = txnCli
+	proc.Base.TxnOperator = txnOp
+	moruntime.ServiceRuntime(proc.GetService()).SetGlobalVariables(
+		moruntime.InternalSQLExecutor,
+		executor.NewMemExecutor(func(sql string) (executor.Result, error) {
+			select {
+			case unexpectedSQL <- sql:
+			default:
+			}
+			return executor.Result{}, errors.New("unexpected nested SQL")
+		}),
+	)
+
+	tableDef := &plan2.TableDef{TblId: 42, Name: "t", Indexes: []*plan2.IndexDef{{
+		IndexName: indexName, IndexTableName: childName, TableExist: true,
+	}}}
+	parent := mock_frontend.NewMockRelation(ctrl)
+	child := mock_frontend.NewMockRelation(ctrl)
+	parent.EXPECT().GetTableID(gomock.Any()).Return(uint64(42)).AnyTimes()
+	parent.EXPECT().GetDBID(gomock.Any()).Return(uint64(7)).AnyTimes()
+	parent.EXPECT().GetExtraInfo().Return(&api.SchemaExtra{IndexTables: []uint64{88}})
+	child.EXPECT().GetTableDef(gomock.Any()).Return(&plan2.TableDef{LogicalId: 88}).AnyTimes()
+	child.EXPECT().GetTableID(gomock.Any()).Return(uint64(88))
+
+	database := mock_frontend.NewMockDatabase(ctrl)
+	database.EXPECT().GetDatabaseId(gomock.Any()).Return("7")
+	gomock.InOrder(
+		database.EXPECT().Relation(gomock.Any(), "t", gomock.Any()).Return(parent, nil),
+		database.EXPECT().Relation(gomock.Any(), childName, gomock.Any()).Return(child, nil),
+		database.EXPECT().Relation(gomock.Any(), childName, gomock.Any()).Return(child, nil),
+		database.EXPECT().Delete(gomock.Any(), childName).DoAndReturn(func(context.Context, string) error {
+			close(deleteEntered)
+			<-releaseDelete
+			return deleteErr
+		}),
+	)
+	eng := mock_frontend.NewMockEngine(ctrl)
+	eng.EXPECT().Database(gomock.Any(), "test", gomock.Any()).Return(database, nil)
+
+	getConstraintDef := gostub.Stub(&GetConstraintDef, func(context.Context, engine.Relation) (*engine.ConstraintDef, error) {
+		return &engine.ConstraintDef{}, nil
+	})
+	defer getConstraintDef.Reset()
+
+	s := &Scope{Plan: &plan2.Plan{Plan: &plan2.Plan_Ddl{Ddl: &plan2.DataDefinition{
+		DdlType: plan2.DataDefinition_ALTER_TABLE,
+		Definition: &plan2.DataDefinition_AlterTable{AlterTable: &plan2.AlterTable{
+			Database: "test", TableDef: tableDef,
+			Actions: []*plan2.AlterTable_Action{{Action: &plan2.AlterTable_Action_Drop{
+				Drop: &plan2.AlterTableDrop{Name: indexName, Typ: plan2.AlterTableDrop_INDEX},
+			}}},
+		}},
+	}}}}
+	c := NewCompile("test", "test", "alter table t drop index idx_v", "", "", eng, proc, nil, false, nil, time.Now())
+	c.pn = s.Plan
+	done := make(chan error, 1)
+	go func() { done <- s.AlterTableInplace(c) }()
+
+	select {
+	case <-deleteEntered:
+	case err := <-done:
+		t.Fatalf("ALTER returned before reaching direct child deletion: %v", err)
+	}
+	select {
+	case sql := <-unexpectedSQL:
+		t.Fatalf("ALTER recursively entered SQL DDL before direct child deletion: %s", sql)
+	default:
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("ALTER returned before the direct delete barrier was released: %v", err)
+	default:
+	}
+	release()
+	require.ErrorIs(t, <-done, deleteErr)
+	select {
+	case sql := <-unexpectedSQL:
+		t.Fatalf("failed child deletion must not continue catalog mutation SQL: %s", sql)
+	default:
+	}
+}
+
 func TestDropSequenceCleansLogicalObjectPrivileges(t *testing.T) {
 	ctx := defines.AttachAccountId(context.Background(), sysAccountId)
 	proc := testutil.NewProcess(t)

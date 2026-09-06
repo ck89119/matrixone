@@ -127,6 +127,9 @@ func encodeRemoteScope(s *Scope, proc *process.Process) ([]byte, error) {
 	if err = validateRemoteGroupingSetPipelineProtocol(proc, p); err != nil {
 		return nil, err
 	}
+	if err = validateRemoteODKUAffectedRowsPipelineProtocol(proc, p); err != nil {
+		return nil, err
+	}
 	return p.Marshal()
 }
 
@@ -204,6 +207,9 @@ func decodeScope(data []byte, proc *process.Process, isRemote bool, eng engine.E
 			return nil, err
 		}
 		if err = validateRemoteUpdateChangedRowsPipelineProtocol(proc, p); err != nil {
+			return nil, err
+		}
+		if err = validateRemoteODKUAffectedRowsPipelineProtocol(proc, p); err != nil {
 			return nil, err
 		}
 		if err = validateRemoteRightDedupInputKeysUniquePipelineProtocol(proc, p); err != nil {
@@ -643,6 +649,10 @@ func convertToPipelineInstruction(op vm.Operator, proc *process.Process, ctx *sc
 			Targets: t.CopyToPipelineTarget(),
 		}
 	case *preinsertunique.PreInsertUnique:
+		if err := validateRemoteODKUActionRowsProtocol(
+			proc, t.PreInsertCtx.GetOdkuTargetArbitration()); err != nil {
+			return ctxId, nil, err
+		}
 		in.PreInsertUnique = &pipeline.PreInsertUnique{
 			PreInsertUkCtx: t.PreInsertCtx,
 		}
@@ -938,6 +948,12 @@ func convertToPipelineInstruction(op vm.Operator, proc *process.Process, ctx *sc
 			RuntimeFilterSpec: t.RuntimeFilterSpec,
 		}
 	case *dedupjoin.DedupJoin:
+		if err := validateRemoteODKUAffectedRowsProtocol(proc, t.HasODKUAffectedRows); err != nil {
+			return ctxId, nil, err
+		}
+		if err := validateRemoteODKUActionRowsProtocol(proc, t.EmitActionRows || len(t.ForeignKeyChecks) > 0); err != nil {
+			return ctxId, nil, err
+		}
 		relList, colList := getRelColList(t.Result)
 		in.DedupJoin = &pipeline.DedupJoin{
 			RelList:                         relList,
@@ -961,6 +977,20 @@ func convertToPipelineInstruction(op vm.Operator, proc *process.Process, ctx *sc
 			UpdateColExprList:               t.UpdateColExprList,
 			OldColCapturePlaceholderIdxList: t.OldColCapturePlaceholderIdxList,
 			OldColCaptureProbeIdxList:       t.OldColCaptureProbeIdxList,
+			HasOdkuAffectedRows:             t.HasODKUAffectedRows,
+			AffectedRowsResultPos:           t.AffectedRowsResultPos,
+			PhysicalChangedRowsResultPos:    t.PhysicalChangedResultPos,
+			UpdateCheckColIdxList:           t.UpdateCheckColIdxList,
+			CountFoundRows:                  t.CountFoundRows,
+			EmitActionRows:                  t.EmitActionRows,
+			ActionFinalResultPos:            t.ActionFinalResultPos,
+		}
+		in.DedupJoin.ForeignKeyChecks = make([]pipeline.ODKUForeignKeyCheck, len(t.ForeignKeyChecks))
+		for i, check := range t.ForeignKeyChecks {
+			in.DedupJoin.ForeignKeyChecks[i] = pipeline.ODKUForeignKeyCheck{
+				ColIdxList:           append([]int32(nil), check.ColIdxList...),
+				EligibilityResultPos: check.EligibilityResultPos,
+			}
 		}
 		in.SpillMem = t.SpillThreshold
 	case *rightdedupjoin.RightDedupJoin:
@@ -1037,6 +1067,10 @@ func convertToPipelineInstruction(op vm.Operator, proc *process.Process, ctx *sc
 		}
 		updateCtxList := make([]*plan.UpdateCtx, len(t.MultiUpdateCtx))
 		for i, muCtx := range t.MultiUpdateCtx {
+			if err := validateRemoteODKUAffectedRowsProtocol(proc,
+				muCtx.AffectedRowsWeightCol != nil || muCtx.PhysicalChangedRowsCol != nil); err != nil {
+				return ctxId, nil, err
+			}
 			updateCtxList[i] = &plan.UpdateCtx{
 				ObjRef:                muCtx.ObjRef,
 				TableDef:              muCtx.TableDef,
@@ -1053,6 +1087,12 @@ func convertToPipelineInstruction(op vm.Operator, proc *process.Process, ctx *sc
 			}
 			if muCtx.ChangedRowsCol != nil {
 				updateCtxList[i].ChangedRowsCol = &plan.ColRef{ColPos: int32(*muCtx.ChangedRowsCol)}
+			}
+			if muCtx.AffectedRowsWeightCol != nil {
+				updateCtxList[i].AffectedRowsWeightCol = &plan.ColRef{ColPos: int32(*muCtx.AffectedRowsWeightCol)}
+			}
+			if muCtx.PhysicalChangedRowsCol != nil {
+				updateCtxList[i].PhysicalChangedRowsCol = &plan.ColRef{ColPos: int32(*muCtx.PhysicalChangedRowsCol)}
 			}
 
 			updateCtxList[i].InsertCols = make([]plan.ColRef, len(muCtx.InsertCols))
@@ -1570,6 +1610,20 @@ func convertToVmOperator(opr *pipeline.Instruction, ctx *scopeContext, eng engin
 		arg.DedupDeleteKeepColIdxList = t.DedupDeleteKeepColIdxList
 		arg.UpdateColIdxList = t.UpdateColIdxList
 		arg.UpdateColExprList = t.UpdateColExprList
+		arg.HasODKUAffectedRows = t.HasOdkuAffectedRows
+		arg.AffectedRowsResultPos = t.AffectedRowsResultPos
+		arg.PhysicalChangedResultPos = t.PhysicalChangedRowsResultPos
+		arg.UpdateCheckColIdxList = t.UpdateCheckColIdxList
+		arg.CountFoundRows = t.CountFoundRows
+		arg.EmitActionRows = t.EmitActionRows
+		arg.ActionFinalResultPos = t.ActionFinalResultPos
+		arg.ForeignKeyChecks = make([]dedupjoin.ODKUForeignKeyCheck, len(t.ForeignKeyChecks))
+		for i, check := range t.ForeignKeyChecks {
+			arg.ForeignKeyChecks[i] = dedupjoin.ODKUForeignKeyCheck{
+				ColIdxList:           append([]int32(nil), check.ColIdxList...),
+				EligibilityResultPos: check.EligibilityResultPos,
+			}
+		}
 		arg.OldColCapturePlaceholderIdxList = t.OldColCapturePlaceholderIdxList
 		arg.OldColCaptureProbeIdxList = t.OldColCaptureProbeIdxList
 		arg.SpillThreshold = opr.SpillMem
@@ -1649,6 +1703,14 @@ func convertToVmOperator(opr *pipeline.Instruction, ctx *scopeContext, eng engin
 			if muCtx.ChangedRowsCol != nil {
 				changedRowsCol := int(muCtx.ChangedRowsCol.ColPos)
 				arg.MultiUpdateCtx[i].ChangedRowsCol = &changedRowsCol
+			}
+			if muCtx.AffectedRowsWeightCol != nil {
+				col := int(muCtx.AffectedRowsWeightCol.ColPos)
+				arg.MultiUpdateCtx[i].AffectedRowsWeightCol = &col
+			}
+			if muCtx.PhysicalChangedRowsCol != nil {
+				col := int(muCtx.PhysicalChangedRowsCol.ColPos)
+				arg.MultiUpdateCtx[i].PhysicalChangedRowsCol = &col
 			}
 
 			arg.MultiUpdateCtx[i].InsertCols = make([]int, len(muCtx.InsertCols))
@@ -1991,6 +2053,72 @@ func validateRemoteAffectedRowsSelectorsProtocol(proc *process.Process, required
 	return nil
 }
 
+func validateRemoteODKUAffectedRowsProtocol(proc *process.Process, required bool) error {
+	if !required {
+		return nil
+	}
+	if proc == nil || !supportsRemoteODKUAffectedRows(proc.GetService()) {
+		return moerr.NewNotSupportedNoCtx(
+			"ODKU logical affected-row metadata requires MORPC protocol version 52",
+		)
+	}
+	return nil
+}
+
+func validateRemoteODKUActionRowsProtocol(proc *process.Process, required bool) error {
+	if !required {
+		return nil
+	}
+	if proc == nil || !supportsRemoteODKUActionRows(proc.GetService()) {
+		return moerr.NewNotSupportedNoCtx(
+			"ODKU per-action constraint metadata requires MORPC protocol version 51",
+		)
+	}
+	return nil
+}
+
+func validateRemoteODKUAffectedRowsPipelineProtocol(
+	proc *process.Process,
+	p *pipeline.Pipeline,
+) error {
+	if p == nil {
+		return nil
+	}
+	for _, instruction := range p.InstructionList {
+		if preInsert := instruction.GetPreInsertUnique(); preInsert != nil &&
+			preInsert.GetPreInsertUkCtx().GetOdkuTargetArbitration() {
+			if err := validateRemoteODKUActionRowsProtocol(proc, true); err != nil {
+				return err
+			}
+		}
+		if dedup := instruction.GetDedupJoin(); dedup != nil &&
+			(dedup.HasOdkuAffectedRows || dedup.EmitActionRows || len(dedup.ForeignKeyChecks) > 0) {
+			if err := validateRemoteODKUAffectedRowsProtocol(proc, dedup.HasOdkuAffectedRows); err != nil {
+				return err
+			}
+			if err := validateRemoteODKUActionRowsProtocol(
+				proc, dedup.EmitActionRows || len(dedup.ForeignKeyChecks) > 0); err != nil {
+				return err
+			}
+		}
+		if multiUpdate := instruction.GetMultiUpdate(); multiUpdate != nil {
+			for _, updateCtx := range multiUpdate.UpdateCtxList {
+				if updateCtx.AffectedRowsWeightCol != nil || updateCtx.PhysicalChangedRowsCol != nil {
+					if err := validateRemoteODKUAffectedRowsProtocol(proc, true); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
+	for _, child := range p.Children {
+		if err := validateRemoteODKUAffectedRowsPipelineProtocol(proc, child); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func validateRemoteTargetAwareUpdatePipelineProtocol(
 	proc *process.Process,
 	p *pipeline.Pipeline,
@@ -2075,7 +2203,7 @@ func validateRemoteBinaryStringPipelineProtocol(
 		value, ok := moruntime.ServiceRuntime(proc.GetService()).
 			GetGlobalVariables(moruntime.MOProtocolVersion)
 		version, versionOK := value.(int64)
-		if ok && versionOK && version >= defines.MORPCVersion50 {
+		if ok && versionOK && version >= defines.MORPCVersion52 {
 			return nil
 		}
 	}
@@ -2086,7 +2214,7 @@ func validateRemoteBinaryStringPipelineProtocol(
 	}
 	return moerr.NewNotSupportedNoCtxf(
 		"binary string function semantics require MORPC protocol version %d",
-		defines.MORPCVersion50)
+		defines.MORPCVersion52)
 }
 
 func validateRemotePadSpacePipelineProtocol(
