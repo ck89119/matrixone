@@ -39,7 +39,7 @@ import (
 
 func TestUpgradeEntries(t *testing.T) {
 	require.Len(t, tenantUpgEntries, 34)
-	require.Len(t, clusterUpgEntries, 10)
+	require.Len(t, clusterUpgEntries, 14)
 	require.Equal(t, retireKafkaSinkDaemonTasks.UpgSql, clusterUpgEntries[0].UpgSql)
 	require.Equal(t, catalog.MO_VIEW_DEPENDENCIES, clusterUpgEntries[1].TableName)
 	require.Equal(t, catalog.MO_VIEW_REFRESH, clusterUpgEntries[2].TableName)
