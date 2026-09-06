@@ -4132,7 +4132,9 @@ func (builder *QueryBuilder) buildUnionWithResultLen(
 	}
 
 	// set ctx's headings  projects  results
+	headingOffset := int32(len(ctx.headings))
 	ctx.headings = append(ctx.headings, subCtxList[0].headings...)
+	mergeHeadingProvenances(&ctx.headingProvenance, subCtxList[0].headingProvenance, headingOffset)
 
 	getProjectList := func(
 		nodeType plan.Node_NodeType,
@@ -4264,7 +4266,7 @@ func (builder *QueryBuilder) buildUnionWithResultLen(
 			}
 		}
 		if allPureNull {
-			ctx.outputColumnProvenance[int32(colIdx)] = OutputColumnProvenance{State: ProvenancePureNull}
+			ctx.setOutputColumnProvenance(int32(colIdx), OutputColumnProvenance{State: ProvenancePureNull})
 		}
 	}
 	// A set-operation result keeps ENUM/SET definition-order provenance only
@@ -4579,6 +4581,7 @@ func (builder *QueryBuilder) buildUnionWithResultLen(
 	}
 
 	ctx.headings = ctx.headings[:resultLen]
+	truncateHeadingProvenances(&ctx.headingProvenance, int32(resultLen))
 
 	// set heading
 	if isRoot {
@@ -4756,7 +4759,7 @@ func (builder *QueryBuilder) bindNoRecursiveCte(
 	}
 
 	for i, col := range cols {
-		subCtx.headings[i] = string(col)
+		subCtx.setHeading(i, string(col), headingProvenance{})
 	}
 
 	if len(cteRef.occurrences) == 0 {
@@ -4767,12 +4770,13 @@ func (builder *QueryBuilder) bindNoRecursiveCte(
 		types[i] = expr.Typ
 	}
 	cteRef.occurrences = append(cteRef.occurrences, cteOccurrence{
-		rootID:       nodeID,
-		rootTag:      subCtx.rootTag(),
-		ctx:          subCtx,
-		headings:     append([]string(nil), subCtx.headings...),
-		types:        types,
-		isCorrelated: subCtx.isCorrelated,
+		rootID:            nodeID,
+		rootTag:           subCtx.rootTag(),
+		ctx:               subCtx,
+		headings:          append([]string(nil), subCtx.headings...),
+		headingProvenance: cloneHeadingProvenances(subCtx.headingProvenance),
+		types:             types,
+		isCorrelated:      subCtx.isCorrelated,
 	})
 	return nodeID, nil
 }
@@ -5021,7 +5025,7 @@ func (builder *QueryBuilder) bindRecursiveCte(
 		}
 
 		for i, col := range cols {
-			subCtx.headings[i] = string(col)
+			subCtx.setHeading(i, string(col), headingProvenance{})
 		}
 	}
 	// Record every column explicitly, including incompatible columns as nil.
@@ -5373,7 +5377,7 @@ func (builder *QueryBuilder) bindSelect(stmt *tree.Select, ctx *BindContext, isR
 			}
 			selectClause.GroupBy.GroupByExprsList = groupByExprsList
 			if len(groupByExprsList) > 1 && !selectClause.GroupBy.Apart {
-				if rewrittenSelect, hasWindow := rewriteRollupWindowSelect(selectClause, astOrderBy, astLimit, astRankOption); hasWindow {
+				if rewrittenSelect, hasWindow := rewriteRollupWindowSelectWithHeadingProvenance(ctx, selectClause, astOrderBy, astLimit, astRankOption); hasWindow {
 					if rewrittenSelect == nil {
 						return 0, moerr.NewNotSupported(builder.GetContext(), "window functions with ROLLUP or CUBE for this expression")
 					}
@@ -6789,6 +6793,17 @@ func rewriteRollupWindowSelect(
 	astLimit *tree.Limit,
 	astRankOption *tree.RankOption,
 ) (*tree.Select, bool) {
+	return rewriteRollupWindowSelectWithHeadingProvenance(
+		nil, selectClause, astOrderBy, astLimit, astRankOption)
+}
+
+func rewriteRollupWindowSelectWithHeadingProvenance(
+	ctx *BindContext,
+	selectClause *tree.SelectClause,
+	astOrderBy tree.OrderBy,
+	astLimit *tree.Limit,
+	astRankOption *tree.RankOption,
+) (*tree.Select, bool) {
 	if selectClause == nil {
 		return nil, false
 	}
@@ -6881,7 +6896,7 @@ func rewriteRollupWindowSelect(
 	leftClause.GeneratedByGroupingSet = true
 
 	derived := &tree.Select{Select: leftClause}
-	return &tree.Select{
+	rewritten := &tree.Select{
 		Select: &tree.SelectClause{
 			Distinct:             selectClause.Distinct,
 			Exprs:                outerExprs,
@@ -6901,26 +6916,40 @@ func rewriteRollupWindowSelect(
 		OrderBy:    rewrittenOrderBy,
 		Limit:      astLimit,
 		RankOption: astRankOption,
-	}, true
+	}
+	if ctx != nil {
+		// The rewritten projection is bound immediately below this call. Reset
+		// any metadata left by a previous bind of the same context so an ordinal
+		// cannot accidentally describe a later, unrelated select list.
+		ctx.generatedHeadingProvenance = nil
+		if len(rewriteState.outputHeadingProvenance) > 0 {
+			ctx.generatedHeadingProvenance = make(headingProvenanceMap, len(rewriteState.outputHeadingProvenance))
+			for ordinal, provenance := range rewriteState.outputHeadingProvenance {
+				ctx.generatedHeadingProvenance[ordinal] = cloneHeadingProvenance(provenance)
+			}
+		}
+	}
+	return rewritten, true
 }
 
 const rollupWindowInternalAliasPrefix = "__mo_rollup_window_col_"
 
 type rollupWindowRewriteState struct {
-	innerExprs         tree.SelectExprs
-	orderExprs         tree.SelectExprs
-	exprAliases        map[tree.Expr]string
-	outputAliases      map[string]string
-	orderAliases       map[string][]tree.Expr
-	sourceProbeAliases map[string]string
-	sourceProbes       map[string]*tree.GroupingSetOrderSourceProbe
-	sourceNameAliases  map[string]string
-	branchSourceNames  map[string]struct{}
-	ambiguousSources   map[string]struct{}
-	activeNameAliases  map[string]string
-	activeOrderBy      bool
-	usedAliases        map[string]struct{}
-	nextAlias          int
+	innerExprs              tree.SelectExprs
+	orderExprs              tree.SelectExprs
+	exprAliases             map[tree.Expr]string
+	outputAliases           map[string]string
+	orderAliases            map[string][]tree.Expr
+	sourceProbeAliases      map[string]string
+	sourceProbes            map[string]*tree.GroupingSetOrderSourceProbe
+	sourceNameAliases       map[string]string
+	branchSourceNames       map[string]struct{}
+	ambiguousSources        map[string]struct{}
+	activeNameAliases       map[string]string
+	activeOrderBy           bool
+	usedAliases             map[string]struct{}
+	outputHeadingProvenance headingProvenanceMap
+	nextAlias               int
 }
 
 func newRollupWindowRewriteState(selectExprs tree.SelectExprs) *rollupWindowRewriteState {
@@ -7104,16 +7133,30 @@ func buildRollupWindowSelectExprs(selectExprs tree.SelectExprs, state *rollupWin
 			if !ok {
 				return nil, false
 			}
+			outputAlias, provenance := rollupWindowOutputAliasWithProvenance(selectExpr)
+			if len(provenance.parts) > 0 {
+				if state.outputHeadingProvenance == nil {
+					state.outputHeadingProvenance = make(headingProvenanceMap)
+				}
+				state.outputHeadingProvenance[int32(i)] = provenance
+			}
 			outerExprs = append(outerExprs, tree.SelectExpr{
 				Expr: rewrittenExpr,
-				As:   rollupWindowOutputAlias(selectExpr),
+				As:   outputAlias,
 			})
 			continue
 		}
 
+		outputAlias, provenance := rollupWindowOutputAliasWithProvenance(selectExpr)
+		if len(provenance.parts) > 0 {
+			if state.outputHeadingProvenance == nil {
+				state.outputHeadingProvenance = make(headingProvenanceMap)
+			}
+			state.outputHeadingProvenance[int32(i)] = provenance
+		}
 		outerExprs = append(outerExprs, tree.SelectExpr{
 			Expr: tree.NewUnresolvedColName(aliasesByIndex[i]),
-			As:   rollupWindowOutputAlias(selectExpr),
+			As:   outputAlias,
 		})
 	}
 
@@ -7135,11 +7178,16 @@ func (state *rollupWindowRewriteState) addSourceNameAlias(name, alias string) {
 }
 
 func rollupWindowOutputAlias(selectExpr tree.SelectExpr) *tree.CStr {
+	alias, _ := rollupWindowOutputAliasWithProvenance(selectExpr)
+	return alias
+}
+
+func rollupWindowOutputAliasWithProvenance(selectExpr tree.SelectExpr) (*tree.CStr, headingProvenance) {
 	if selectExpr.As != nil && !selectExpr.As.Empty() {
-		return selectExpr.As
+		return selectExpr.As, headingProvenance{}
 	}
 	if colName, ok := rollupWindowBareColumnName(selectExpr.Expr); ok {
-		return tree.NewCStr(colName, 1)
+		return tree.NewCStr(colName, 1), headingProvenance{}
 	}
 	expr := selectExpr.Expr
 	for {
@@ -7150,9 +7198,10 @@ func rollupWindowOutputAlias(selectExpr tree.SelectExpr) *tree.CStr {
 		expr = parenExpr.Expr
 	}
 	if heading, ok := nameConstHeading(expr); ok {
-		return tree.NewCStr(heading, 1)
+		return tree.NewCStr(heading, 1), headingProvenance{}
 	}
-	return tree.NewCStr(tree.String(expr, dialect.MYSQL), 1)
+	heading, provenance := formatSelectExpressionHeading(expr)
+	return tree.NewCStr(heading, 1), provenance
 }
 
 func rollupWindowBareColumnName(expr tree.Expr) (string, bool) {
@@ -9294,7 +9343,7 @@ func sampleStarColumnsForView(
 		if err != nil {
 			return nil, err
 		}
-		columns, _, err := ctx.unfoldStar(builder.GetContext(), "", accountID == catalog.System_Account)
+		columns, _, _, err := ctx.unfoldStar(builder.GetContext(), "", accountID == catalog.System_Account)
 		if err != nil {
 			return nil, err
 		}
@@ -9717,7 +9766,7 @@ func (builder *QueryBuilder) bindValues(
 			Expr: tree.NewUnresolvedColName(colName),
 			As:   tree.NewCStr(colName, ctx.lower),
 		})
-		ctx.headings = append(ctx.headings, colName)
+		ctx.appendHeading(colName, headingProvenance{})
 		tableDef.Cols[i] = &plan.ColDef{
 			ColId: 0,
 			Name:  colName,
@@ -10501,13 +10550,13 @@ func appendSelectListWithGroupingOrder(
 		}
 		switch expr := selectExpr.Expr.(type) {
 		case tree.UnqualifiedStar:
-			cols, names, err := ctx.unfoldStar(builder.GetContext(), "", accountId == catalog.System_Account)
+			cols, names, provenances, err := ctx.unfoldStar(builder.GetContext(), "", accountId == catalog.System_Account)
 			if err != nil {
 				return nil, err
 			}
 			for i, name := range names {
 				selectList = append(selectList, cols[i])
-				ctx.headings = append(ctx.headings, name)
+				ctx.appendHeading(name, provenances[int32(i)])
 			}
 
 		case *tree.SampleExpr:
@@ -10536,7 +10585,7 @@ func appendSelectListWithGroupingOrder(
 				if sampleCount != 1 {
 					return nil, moerr.NewSyntaxError(builder.GetContext(), "sample multi columns cannot have alias")
 				}
-				ctx.headings[len(ctx.headings)-1] = selectExpr.As.Origin()
+				ctx.setHeading(len(ctx.headings)-1, selectExpr.As.Origin(), headingProvenance{})
 				selectList[len(selectList)-1].As = selectExpr.As
 			}
 
@@ -10544,17 +10593,20 @@ func appendSelectListWithGroupingOrder(
 
 		case *tree.UnresolvedName:
 			if expr.Star {
-				cols, names, err := ctx.unfoldStar(builder.GetContext(), expr.ColName(), accountId == catalog.System_Account)
+				cols, names, provenances, err := ctx.unfoldStar(builder.GetContext(), expr.ColName(), accountId == catalog.System_Account)
 				if err != nil {
 					return nil, err
 				}
 				selectList = append(selectList, cols...)
-				ctx.headings = append(ctx.headings, names...)
+				for i, name := range names {
+					ctx.appendHeading(name, provenances[int32(i)])
+				}
 			} else {
 				if selectExpr.As != nil && !selectExpr.As.Empty() {
-					ctx.headings = append(ctx.headings, selectExpr.As.Origin())
+					provenance := ctx.generatedHeadingProvenance[int32(exprIdx)]
+					ctx.appendHeading(selectExpr.As.Origin(), provenance)
 				} else {
-					ctx.headings = append(ctx.headings, expr.ColNameOrigin())
+					ctx.appendHeading(expr.ColNameOrigin(), headingProvenance{})
 				}
 
 				newExpr, err := qualifyExpr(expr)
@@ -10573,9 +10625,9 @@ func appendSelectListWithGroupingOrder(
 			}
 
 			if selectExpr.As != nil && !selectExpr.As.Empty() {
-				ctx.headings = append(ctx.headings, selectExpr.As.Origin())
+				ctx.appendHeading(selectExpr.As.Origin(), headingProvenance{})
 			} else {
-				ctx.headings = append(ctx.headings, tree.String(expr, dialect.MYSQL))
+				ctx.appendHeading(tree.String(expr, dialect.MYSQL), headingProvenance{})
 			}
 
 			selectList = append(selectList, tree.SelectExpr{
@@ -10584,7 +10636,8 @@ func appendSelectListWithGroupingOrder(
 			})
 		default:
 			if selectExpr.As != nil && !selectExpr.As.Empty() {
-				ctx.headings = append(ctx.headings, selectExpr.As.Origin())
+				provenance := ctx.generatedHeadingProvenance[int32(exprIdx)]
+				ctx.appendHeading(selectExpr.As.Origin(), provenance)
 			} else {
 				for {
 					if parenExpr, ok := expr.(*tree.ParenExpr); ok {
@@ -10594,9 +10647,10 @@ func appendSelectListWithGroupingOrder(
 					}
 				}
 				if heading, ok := nameConstHeading(expr); ok {
-					ctx.headings = append(ctx.headings, heading)
+					ctx.appendHeading(heading, headingProvenance{})
 				} else {
-					ctx.headings = append(ctx.headings, tree.String(expr, dialect.MYSQL))
+					heading, provenance := formatSelectExpressionHeading(expr)
+					ctx.appendHeading(heading, provenance)
 				}
 			}
 
@@ -10740,6 +10794,77 @@ func nameConstHeading(expr tree.Expr) (string, bool) {
 		return "", false
 	}
 	return name.String(), true
+}
+
+// DATE_FORMAT and TIME_FORMAT patterns are case-sensitive SQL string literals.
+// Preserve their spelling in the default result heading; otherwise a pattern
+// such as %M would be displayed as the semantically different %m after CTAS
+// identifier normalization. The first formatter pass is the cheap common path
+// and detects the relevant function while rendering. Only expressions that
+// actually contain one are rendered again with literal positions enabled.
+func formatSelectExpressionHeading(expr tree.Expr) (string, headingProvenance) {
+	for {
+		paren, ok := expr.(*tree.ParenExpr)
+		if !ok {
+			break
+		}
+		expr = paren.Expr
+	}
+
+	detectCtx := tree.NewFmtCtx(dialect.MYSQL, tree.WithDateTimeFormatDetection())
+	expr.Format(detectCtx)
+	heading := detectCtx.String()
+	if !detectCtx.HasDateTimeFormatFunction() {
+		return heading, headingProvenance{}
+	}
+
+	var positions []tree.StringLiteralPosition
+	formattedCtx := tree.NewFmtCtx(
+		dialect.MYSQL,
+		tree.WithSingleQuoteString(),
+		tree.WithStringLiteralPositions(&positions),
+	)
+	expr.Format(formattedCtx)
+	if len(positions) == 0 {
+		// A dynamic format expression has no SQL string literal to preserve.
+		// Returning the first-pass heading keeps the established identifier
+		// normalization for the complete rendered heading.
+		return heading, headingProvenance{}
+	}
+	formatted := formattedCtx.String()
+	provenance := headingProvenanceFromLiteralPositions(formatted, positions)
+	if len(provenance.parts) == 0 {
+		return heading, headingProvenance{}
+	}
+	return formatted, provenance
+}
+
+func headingProvenanceFromLiteralPositions(
+	formatted string,
+	positions []tree.StringLiteralPosition,
+) headingProvenance {
+	parts := make([]headingPart, 0, len(positions)*2+1)
+	previous := 0
+	for _, position := range positions {
+		if position.Start < previous || position.Start < 0 || position.End < position.Start || position.End > len(formatted) {
+			return headingProvenance{}
+		}
+		if position.Start > previous {
+			parts = append(parts, headingPart{text: formatted[previous:position.Start]})
+		}
+		parts = append(parts, headingPart{
+			text:    formatted[position.Start:position.End],
+			literal: true,
+		})
+		previous = position.End
+	}
+	if previous < len(formatted) {
+		parts = append(parts, headingPart{text: formatted[previous:]})
+	}
+	if len(parts) == 0 {
+		return headingProvenance{}
+	}
+	return headingProvenance{parts: parts}
 }
 
 func validNameConstNameLiteral(name *tree.NumVal) bool {
@@ -11135,7 +11260,7 @@ func (builder *QueryBuilder) bindView(
 			return 0, moerr.NewViewWrongList(builder.GetContext())
 		}
 		for i, colName := range viewStmt.ColNames {
-			viewCtx.headings[i] = string(colName)
+			viewCtx.setHeading(i, string(colName), headingProvenance{})
 		}
 	}
 	// Expanding a view removes the view catalog object from the executable
@@ -11239,7 +11364,7 @@ func (builder *QueryBuilder) appendMySQLSpecialTypeBoundary(
 	}
 	if needsBoundary {
 		for i := 0; i < visibleProjects && i < len(provenance); i++ {
-			ctx.outputColumnProvenance[int32(i)] = provenance[i]
+			ctx.setOutputColumnProvenance(int32(i), provenance[i])
 		}
 		ctx.projectTag = builder.genNewBindTag()
 		ctx.resultTag = 0
@@ -12107,6 +12232,7 @@ func (builder *QueryBuilder) addBinding(nodeID int32, alias tree.AliasClause, ct
 	var mysqlSpecialOrderTypes []*plan.Type
 	var mysqlSpecialCanonicalTypes []*plan.Type
 	var outputColumnProvenance []OutputColumnProvenance
+	var headingMetadata headingProvenanceMap
 	var defaultVals []string
 	var binding *Binding
 	var bindingToReplace *Binding
@@ -12162,12 +12288,19 @@ func (builder *QueryBuilder) addBinding(nodeID int32, alias tree.AliasClause, ct
 		colIsHidden = make([]bool, colLength)
 		types = make([]*plan.Type, colLength)
 		defaultVals = make([]string, colLength)
+		if shared := builder.headingProvenanceByNode[nodeID]; len(shared) > 0 {
+			headingMetadata = cloneHeadingProvenances(shared)
+			delete(builder.headingProvenanceByNode, nodeID)
+		}
 
 		tag := node.BindingTags[0]
 
 		for i, col := range node.TableDef.Cols {
 			if i < len(alias.Cols) {
 				cols[i] = string(alias.Cols[i])
+				if headingMetadata != nil {
+					delete(headingMetadata, int32(i))
+				}
 			} else {
 				cols[i] = col.Name
 			}
@@ -12190,6 +12323,7 @@ func (builder *QueryBuilder) addBinding(nodeID int32, alias tree.AliasClause, ct
 		binding = NewBinding(tag, nodeID, node.TableDef.DbName, table, node.TableDef.TblId, cols, colIsHidden, types,
 			util.TableIsClusterTable(node.TableDef.TableType), defaultVals)
 		binding.originCols = originCols
+		binding.headingProvenance = headingMetadata
 		binding.outputColumnProvenance = make([]OutputColumnProvenance, colLength)
 		for i, col := range node.TableDef.Cols {
 			binding.outputColumnProvenance[i] = OutputColumnProvenance{
@@ -12233,12 +12367,16 @@ func (builder *QueryBuilder) addBinding(nodeID int32, alias tree.AliasClause, ct
 		colLength := len(headings)
 		cols = make([]string, colLength)
 		originCols := make([]string, colLength)
+		headingMetadata := cloneHeadingProvenances(subCtx.headingProvenance)
 		colIsHidden = make([]bool, colLength)
 		types = make([]*plan.Type, colLength)
 		defaultVals = make([]string, colLength)
 		for i, col := range headings {
 			if i < len(alias.Cols) {
 				cols[i] = string(alias.Cols[i])
+				if headingMetadata != nil {
+					delete(headingMetadata, int32(i))
+				}
 			} else {
 				cols[i] = col
 			}
@@ -12272,6 +12410,7 @@ func (builder *QueryBuilder) addBinding(nodeID int32, alias tree.AliasClause, ct
 
 		binding = NewBinding(tag, nodeID, "", table, 0, cols, colIsHidden, types, false, defaultVals)
 		binding.originCols = originCols
+		binding.headingProvenance = headingMetadata
 		binding.mysqlSpecialOrderTypes = mysqlSpecialOrderTypes
 		binding.mysqlSpecialCanonicalTypes = mysqlSpecialCanonicalTypes
 		binding.outputColumnProvenance = outputColumnProvenance
