@@ -444,21 +444,23 @@ func (compiled *compiledByteLikePattern) match(value []byte) (bool, error) {
 			return false, nil
 		}
 		nextCursor := matchAt + segmentEnd - segmentAt
-		// Keep frequencies exact for the next segment's [cursor, searchLimit) range.
-		// Across the complete match each value byte is removed at most once.
-		for at := cursor; at < nextCursor; at++ {
-			if (at-cursor)&(byteLikeCancellationCheckInterval-1) == 0 {
-				if err := compiled.byteLikeCancellationError(); err != nil {
-					return false, err
-				}
-			}
-			literalFrequency[value[at]]--
-		}
-		cursor = nextCursor
 		segmentAt = segmentEnd
 		for segmentAt < suffixAt && compiled.kinds[segmentAt] == byteLikeAny {
 			segmentAt++
 		}
+		if segmentAt < suffixAt {
+			// Keep frequencies exact for the next segment's [cursor, searchLimit) range.
+			// Across the complete match each value byte is removed at most once.
+			for at := cursor; at < nextCursor; at++ {
+				if (at-cursor)&(byteLikeCancellationCheckInterval-1) == 0 {
+					if err := compiled.byteLikeCancellationError(); err != nil {
+						return false, err
+					}
+				}
+				literalFrequency[value[at]]--
+			}
+		}
+		cursor = nextCursor
 	}
 	return cursor <= searchLimit, nil
 }

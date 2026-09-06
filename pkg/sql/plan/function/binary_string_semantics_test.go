@@ -1056,7 +1056,7 @@ func TestByteLikeAnchorSearchChecksCancellationAfterIndex(t *testing.T) {
 
 func TestByteLikeFrequencyDecrementHonorsCancellation(t *testing.T) {
 	mp := mpool.MustNewZero()
-	compiled, err := compileByteLikePattern([]byte("%a%"), nil, false, mp)
+	compiled, err := compileByteLikePattern([]byte("%a%b%"), nil, false, mp)
 	require.NoError(t, err)
 	defer compiled.free()
 	cancelContext := newByteLikeCancelAfterChecksContext(6)
