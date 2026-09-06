@@ -267,7 +267,7 @@ func TestInitInformationSchemaSysTablesForProtocol(t *testing.T) {
 		})
 	}
 
-	for _, protocol := range []int64{defines.MORPCVersion46, defines.MORPCVersion47} {
+	for _, protocol := range []int64{defines.MORPCVersion46, defines.MORPCVersion47, defines.MORPCVersion48, defines.MORPCVersion49} {
 		t.Run(fmt.Sprintf("subscription-legacy-identity-v%d", protocol), func(t *testing.T) {
 			subscriptionLegacyIdentity := InitInformationSchemaSysTablesForProtocol(protocol)
 			assert.Len(t, subscriptionLegacyIdentity, len(InitInformationSchemaSysTables))
@@ -285,7 +285,7 @@ func TestInitInformationSchemaSysTablesForProtocol(t *testing.T) {
 		})
 	}
 
-	latest := InitInformationSchemaSysTablesForProtocol(defines.MORPCVersion48)
+	latest := InitInformationSchemaSysTablesForProtocol(defines.MORPCVersion50)
 	assert.Equal(t, InitInformationSchemaSysTables, latest)
 	assert.Contains(t, strings.Join(latest, "\n"), "WHEN 3 then 'utf8mb4'")
 }

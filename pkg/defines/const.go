@@ -83,9 +83,10 @@ const (
 	MORPCVersion45     int64 = 45 // bounded Parquet whole-file fanout payload
 	MORPCVersion46     int64 = 46 // subscription-aware information-schema metadata table functions
 	MORPCVersion47     int64 = 47 // ordinary window hash partition pipeline algorithm
-	MORPCVersion48     int64 = 48 // binary-string function semantics and runtime-domain metadata
+	MORPCVersion48     int64 = 48 // generation-aware CDC watermark catalog
 	MORPCVersion49     int64 = 49 // vector-level grouping-set projection expansion
-	MORPCLatestVersion       = MORPCVersion49
+	MORPCVersion50     int64 = 50 // binary-string function semantics and runtime-domain metadata
+	MORPCLatestVersion       = MORPCVersion50
 )
 
 // DefaultLockWaitTimeoutSeconds is shared by the frontend default and by
