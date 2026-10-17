@@ -7,6 +7,8 @@ on:
     paths:
       - .github/workflows/ut-cancel-diagnostics.yml
       - .github/ci/ut-cancel-trace.bash
+      - .github/ci/ut-cancel-observe.py
+      - .github/ci/test_ut_cancel_observe.py
       - optools/**
 
 permissions:
@@ -51,12 +53,14 @@ jobs:
           sudo apt-get install -y -qq strace
           command -v python3
           strace --version >> "$DIAGNOSTIC_ROOT/environment.txt"
+      - name: Validate read-only observation contracts
+        run: python3 -B .github/ci/test_ut_cancel_observe.py -v
       - name: Build the unchanged race fixtures
         run: |
           set -euo pipefail
           go test -mod=readonly -race -tags matrixone_test -c \
             -o "$DIAGNOSTIC_ROOT/optools.test" ./optools
-      - name: Run exact controls and bounded signal traces
+      - name: Run observed controls and bounded signal reference
         working-directory: optools
         run: |
           set -euo pipefail
@@ -70,7 +74,10 @@ jobs:
             local -a invocation=(go tool test2json -t -p github.com/matrixorigin/matrixone/optools
               "$DIAGNOSTIC_ROOT/optools.test" -test.short -test.v=test2json
               "-test.run=^${test_name}$" "-test.count=$count" -test.timeout=120s)
-            if [[ "$mode" == control ]]; then
+            # Initial control/reference retain the complete fixture matrix.
+            # Only repeated measurements stop on their first failure.
+            if (( count > 1 )); then invocation+=(-test.failfast); fi
+            if [[ "$mode" == control* ]]; then
               invocation=(env -u BASH_ENV -u MO_CANCEL_TRACE_DIR "${invocation[@]}")
             else
               invocation=(env "BASH_ENV=$GITHUB_WORKSPACE/.github/ci/ut-cancel-trace.bash"
@@ -80,9 +87,11 @@ jobs:
                 "${invocation[@]}")
             fi
             # This is a diagnostic-command guard, not a larger fixture timeout.
-            timeout --signal=TERM --kill-after=5s 150s "${invocation[@]}" \
+            timeout --signal=TERM --kill-after=5s 150s \
+              python3 "$GITHUB_WORKSPACE/.github/ci/ut-cancel-observe.py" \
+              --output "$output" --test "$test_name" -- "${invocation[@]}" \
               > "$output/test.json" 2> "$output/stderr.log" || result=$?
-            if (( result == 0 )) && [[ "$mode" != control ]]; then
+            if (( result == 0 )) && [[ "$mode" == trace ]]; then
               local shell_trace have_shell_trace=0
               for shell_trace in "$output"/*.bash-trace; do
                 if [[ -s "$shell_trace" ]]; then have_shell_trace=1; break; fi
@@ -93,8 +102,12 @@ jobs:
               fi
             fi
             if (( result == 0 )); then
-              python3 - "$output/test.json" "$test_name" "$count" <<'PY' >> "$output/stderr.log" 2>&1 || result=125
+              python3 - "$output/test.json" "$test_name" "$count" "$output/observer-status.json" <<'PY' >> "$output/stderr.log" 2>&1 || result=125
           import json, sys
+          with open(sys.argv[4]) as stream:
+              observer = json.load(stream)
+          if observer.get("command_exit") != 0 or observer.get("observer_exit") != 0:
+              raise SystemExit(f"observer/command terminal proof failed: {observer}")
           with open(sys.argv[1]) as stream:
               events = [json.loads(line) for line in stream]
           passed = [event for event in events if event.get("Test") == sys.argv[2] and event["Action"] == "pass"]
@@ -114,7 +127,7 @@ jobs:
             run_case "$test_name" trace 1
             # A failing measurement remains a failure; do not retry it to green.
             if (( control_status != 0 || last_status != 0 )); then continue; fi
-            repeats=$(python3 - "$DIAGNOSTIC_ROOT/$test_name/trace/test.json" "$test_name" <<'PY'
+            repeats=$(python3 - "$DIAGNOSTIC_ROOT/$test_name/control/test.json" "$test_name" <<'PY'
           import json, sys
           with open(sys.argv[1]) as stream:
               events = [json.loads(line) for line in stream]
@@ -122,11 +135,12 @@ jobs:
           print(max(1, min(100, int(30 / elapsed))) if elapsed > 0 else 100)
           PY
             )
-            if (( repeats > 1 )); then run_case "$test_name" trace-repeat "$repeats"; fi
+            if (( repeats > 1 )); then run_case "$test_name" control-repeat "$repeats"; fi
           done
           {
             echo '### Cancellation diagnostics (not a fix)'
             echo 'Native hosted Ubuntu/x86; not the original self-hosted 8C/16G runner.'
+            echo 'Controls have no strace/xtrace injection; an external ancestor reads bounded Bash signal state.'
             echo '```text'
             while IFS= read -r line; do printf '%s\n' "$line"; done < "$DIAGNOSTIC_ROOT/status.tsv"
             echo '```'
