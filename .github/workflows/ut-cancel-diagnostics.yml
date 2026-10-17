@@ -1,0 +1,145 @@
+name: UT cancellation diagnostics
+
+# Temporary investigation branch only; not part of the required/full CI suite.
+on:
+  push:
+    branches: [issue-30281-main]
+    paths:
+      - .github/workflows/ut-cancel-diagnostics.yml
+      - .github/ci/ut-cancel-trace.bash
+      - optools/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ut-cancel-diagnostics-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  cancellation:
+    if: github.repository == 'ck89119/matrixone'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    env:
+      GOWORK: 'off'
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Prepare native x86 diagnostics
+        run: |
+          set -euo pipefail
+          DIAGNOSTIC_ROOT="$RUNNER_TEMP/ut-cancel-diagnostics"
+          printf 'DIAGNOSTIC_ROOT=%s\n' "$DIAGNOSTIC_ROOT" >> "$GITHUB_ENV"
+          mkdir -p "$DIAGNOSTIC_ROOT"
+          {
+            git rev-parse HEAD
+            uname -a
+            bash --version
+            go version
+            nproc
+            free -m
+          } > "$DIAGNOSTIC_ROOT/environment.txt"
+          [[ "$(uname -m)" == x86_64 ]]
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq strace
+          command -v python3
+          strace --version >> "$DIAGNOSTIC_ROOT/environment.txt"
+      - name: Build the unchanged race fixtures
+        run: |
+          set -euo pipefail
+          go test -mod=readonly -race -tags matrixone_test -c \
+            -o "$DIAGNOSTIC_ROOT/optools.test" ./optools
+      - name: Run exact controls and bounded signal traces
+        working-directory: optools
+        run: |
+          set -euo pipefail
+          overall_status=0
+          last_status=0
+          printf 'test\tmode\tcount\texit\n' > "$DIAGNOSTIC_ROOT/status.tsv"
+          run_case() {
+            local test_name=$1 mode=$2 count=$3 result=0
+            local output="$DIAGNOSTIC_ROOT/$test_name/$mode"
+            mkdir -p "$output"
+            local -a invocation=(go tool test2json -t -p github.com/matrixorigin/matrixone/optools
+              "$DIAGNOSTIC_ROOT/optools.test" -test.short -test.v=test2json
+              "-test.run=^${test_name}$" "-test.count=$count" -test.timeout=120s)
+            if [[ "$mode" == control ]]; then
+              invocation=(env -u BASH_ENV -u MO_CANCEL_TRACE_DIR "${invocation[@]}")
+            else
+              invocation=(env "BASH_ENV=$GITHUB_WORKSPACE/.github/ci/ut-cancel-trace.bash"
+                "MO_CANCEL_TRACE_DIR=$output"
+                strace -f -ttt -s 256 -o "$output/syscalls.trace"
+                -e trace=kill,tgkill,tkill,rt_sigaction,rt_sigprocmask,wait4,waitid,setpgid,setsid,clone,clone3,fork,vfork,exit,exit_group
+                "${invocation[@]}")
+            fi
+            # This is a diagnostic-command guard, not a larger fixture timeout.
+            timeout --signal=TERM --kill-after=5s 150s "${invocation[@]}" \
+              > "$output/test.json" 2> "$output/stderr.log" || result=$?
+            if (( result == 0 )) && [[ "$mode" != control ]]; then
+              local shell_trace have_shell_trace=0
+              for shell_trace in "$output"/*.bash-trace; do
+                if [[ -s "$shell_trace" ]]; then have_shell_trace=1; break; fi
+              done
+              if [[ ! -s "$output/syscalls.trace" ]] || (( have_shell_trace == 0 )); then
+                printf 'missing signal/shell evidence\n' >> "$output/stderr.log"
+                result=125
+              fi
+            fi
+            if (( result == 0 )); then
+              python3 - "$output/test.json" "$test_name" "$count" <<'PY' >> "$output/stderr.log" 2>&1 || result=125
+          import json, sys
+          with open(sys.argv[1]) as stream:
+              events = [json.loads(line) for line in stream]
+          passed = [event for event in events if event.get("Test") == sys.argv[2] and event["Action"] == "pass"]
+          if len(passed) != int(sys.argv[3]):
+              raise SystemExit(f"non-empty selection/terminal proof failed: expected {sys.argv[3]} root passes, got {len(passed)}")
+          PY
+            fi
+            printf '%s\t%s\t%s\t%s\n' "$test_name" "$mode" "$count" "$result" >> "$DIAGNOSTIC_ROOT/status.tsv"
+            if (( result != 0 )); then overall_status=1; fi
+            last_status=$result
+          }
+          for test_name in \
+            TestEmbeddedPrebuiltOuterCancellationKillsResistantGroup \
+            TestHeavyPlanCancellationStopsWritersBeforeMerge; do
+            run_case "$test_name" control 1
+            control_status=$last_status
+            run_case "$test_name" trace 1
+            # A failing measurement remains a failure; do not retry it to green.
+            if (( control_status != 0 || last_status != 0 )); then continue; fi
+            repeats=$(python3 - "$DIAGNOSTIC_ROOT/$test_name/trace/test.json" "$test_name" <<'PY'
+          import json, sys
+          with open(sys.argv[1]) as stream:
+              events = [json.loads(line) for line in stream]
+          elapsed = next(event["Elapsed"] for event in events if event.get("Test") == sys.argv[2] and event["Action"] == "pass")
+          print(max(1, min(100, int(30 / elapsed))) if elapsed > 0 else 100)
+          PY
+            )
+            if (( repeats > 1 )); then run_case "$test_name" trace-repeat "$repeats"; fi
+          done
+          {
+            echo '### Cancellation diagnostics (not a fix)'
+            echo 'Native hosted Ubuntu/x86; not the original self-hosted 8C/16G runner.'
+            echo '```text'
+            while IFS= read -r line; do printf '%s\n' "$line"; done < "$DIAGNOSTIC_ROOT/status.tsv"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$overall_status"
+      - name: Preserve terminal results and signal evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ut-cancel-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.DIAGNOSTIC_ROOT }}/environment.txt
+            ${{ env.DIAGNOSTIC_ROOT }}/status.tsv
+            ${{ env.DIAGNOSTIC_ROOT }}/Test*/
+          if-no-files-found: error
+          retention-days: 5
